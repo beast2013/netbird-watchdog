@@ -4,8 +4,11 @@
 # Monitors the Netbird interface and activates an SSH failsafe when the VPN
 # has been down longer than the configured grace period.
 #
-# Failsafe ON:  ListenAddress 0.0.0.0 + ufw allow SSH from resolved domain IP
-# Failsafe OFF: Drop-in removed, ufw rule deleted, sshd reloaded
+# Failsafe ON:  ListenAddress 0.0.0.0 + firewall rule allowing SSH from
+#               the resolved FAILSAFE_DOMAIN IP
+# Failsafe OFF: Drop-in removed, firewall rule deleted, sshd reloaded
+#
+# Firewall backends: ufw, iptables (set FIREWALL=auto to detect at startup)
 # =============================================================================
 
 set -uo pipefail
@@ -14,13 +17,15 @@ set -uo pipefail
 NETBIRD_IFACE="${NETBIRD_IFACE:-wt0}"
 FAILSAFE_DOMAIN="${FAILSAFE_DOMAIN:-yourdomain.example.com}"
 SSH_PORT="${SSH_PORT:-22}"
-GRACE_PERIOD="${GRACE_PERIOD:-120}"    # seconds down before triggering failsafe
-CHECK_INTERVAL="${CHECK_INTERVAL:-30}" # seconds between checks
+FIREWALL="${FIREWALL:-auto}"               # auto, ufw, or iptables
+GRACE_PERIOD="${GRACE_PERIOD:-120}"        # seconds down before triggering failsafe
+CHECK_INTERVAL="${CHECK_INTERVAL:-30}"     # seconds between checks
 
 # ── Internal paths
 STATE_DIR="/run/netbird-watchdog"
 STATE_FILE="${STATE_DIR}/state"
 FAILSAFE_IP_FILE="${STATE_DIR}/failsafe_ip"
+FIREWALL_BACKEND_FILE="${STATE_DIR}/firewall_backend"  # backend used at activation
 SSHD_DROP_IN="/etc/ssh/sshd_config.d/99-netbird-watchdog.conf"
 LOG_TAG="netbird-watchdog"
 
@@ -175,17 +180,36 @@ remove_sshd_dropin() {
     return 1
 }
 
-# ── UFW helpers ───────────────────────────────────────────────────────────────
+# ── Firewall abstraction ───────────────────────────────────────────────────────
 
-ufw_rule_exists() {
+# Resolves FIREWALL=auto to 'ufw' or 'iptables' and prints the result.
+# Prefers ufw if it is installed and actively enabled; falls back to iptables.
+detect_firewall() {
+    if [[ "$FIREWALL" != "auto" ]]; then
+        echo "$FIREWALL"
+        return 0
+    fi
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+        echo "ufw"
+    elif command -v iptables &>/dev/null; then
+        echo "iptables"
+    else
+        err "FIREWALL=auto: cannot find ufw (active) or iptables — install one of them"
+        return 1
+    fi
+}
+
+# ── UFW backend ────────────────────────────────────────────────────────────────
+
+_ufw_rule_exists() {
     local ip="$1"
     ufw status | grep -qF "$ip"
 }
 
-add_ufw_rule() {
+_ufw_add() {
     local ip="$1"
-    if ufw_rule_exists "$ip"; then
-        log "UFW rule for $ip already present — skipping add"
+    if _ufw_rule_exists "$ip"; then
+        log "UFW: rule for $ip already present — skipping add"
     else
         ufw --force allow from "$ip" to any port "$SSH_PORT" proto tcp \
             comment "netbird-watchdog"
@@ -193,14 +217,66 @@ add_ufw_rule() {
     fi
 }
 
-delete_ufw_rule() {
+_ufw_delete() {
     local ip="$1"
-    if ufw_rule_exists "$ip"; then
+    if _ufw_rule_exists "$ip"; then
         ufw --force delete allow from "$ip" to any port "$SSH_PORT" proto tcp
         log "UFW: removed allow ssh rule for $ip"
     else
-        warn "UFW rule for $ip not found — nothing to delete"
+        warn "UFW: rule for $ip not found — nothing to delete"
     fi
+}
+
+# ── iptables backend ───────────────────────────────────────────────────────────
+
+_ipt_rule_exists() {
+    local ip="$1"
+    iptables -C INPUT -s "$ip" -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null
+}
+
+_ipt_add() {
+    local ip="$1"
+    if _ipt_rule_exists "$ip"; then
+        log "iptables: rule for $ip already present — skipping add"
+    else
+        # Insert at position 1 so it takes effect before any DROP rules
+        iptables -I INPUT 1 -s "$ip" -p tcp --dport "$SSH_PORT" -j ACCEPT \
+            -m comment --comment "netbird-watchdog"
+        log "iptables: inserted allow ssh from $ip at INPUT pos 1"
+    fi
+}
+
+_ipt_delete() {
+    local ip="$1"
+    if _ipt_rule_exists "$ip"; then
+        iptables -D INPUT -s "$ip" -p tcp --dport "$SSH_PORT" -j ACCEPT \
+            -m comment --comment "netbird-watchdog"
+        log "iptables: removed allow ssh rule for $ip"
+    else
+        warn "iptables: rule for $ip not found — nothing to delete"
+    fi
+}
+
+# ── Generic firewall interface ─────────────────────────────────────────────────
+
+# add_firewall_rule <ip> <backend>
+add_firewall_rule() {
+    local ip="$1" backend="$2"
+    case "$backend" in
+        ufw)      _ufw_add      "$ip" ;;
+        iptables) _ipt_add      "$ip" ;;
+        *) err "Unknown firewall backend '${backend}'"; return 1 ;;
+    esac
+}
+
+# delete_firewall_rule <ip> <backend>
+delete_firewall_rule() {
+    local ip="$1" backend="$2"
+    case "$backend" in
+        ufw)      _ufw_delete   "$ip" ;;
+        iptables) _ipt_delete   "$ip" ;;
+        *) err "Unknown firewall backend '${backend}'"; return 1 ;;
+    esac
 }
 
 # ── Failsafe ON ───────────────────────────────────────────────────────────────
@@ -213,7 +289,13 @@ activate_failsafe() {
         return 1
     fi
 
-    log "Resolved ${FAILSAFE_DOMAIN} → ${resolved_ip}"
+    local backend
+    if ! backend=$(detect_firewall); then
+        err "Cannot activate failsafe without a working firewall backend — will retry next cycle"
+        return 1
+    fi
+
+    log "Resolved ${FAILSAFE_DOMAIN} → ${resolved_ip} | firewall backend: ${backend}"
 
     # 1. Write sshd drop-in and reload
     write_sshd_dropin
@@ -225,41 +307,52 @@ activate_failsafe() {
         return 1
     fi
 
-    # 2. Add UFW rule
-    add_ufw_rule "$resolved_ip"
+    # 2. Add firewall rule
+    add_firewall_rule "$resolved_ip" "$backend"
 
-    # 3. Persist state
+    # 3. Persist state (save backend so restore uses the same one)
     echo "$resolved_ip" > "$FAILSAFE_IP_FILE"
+    echo "$backend"     > "$FIREWALL_BACKEND_FILE"
     set_state "failsafe"
 
-    log "=== FAILSAFE ACTIVE: SSH open on 0.0.0.0:${SSH_PORT}, allowed from ${resolved_ip} ==="
+    log "=== FAILSAFE ACTIVE: SSH open on 0.0.0.0:${SSH_PORT}, allowed from ${resolved_ip} (${backend}) ==="
 }
 
 # ── Failsafe OFF ──────────────────────────────────────────────────────────────
 restore_normal() {
     log "=== Netbird recovered — RESTORING NORMAL CONFIGURATION ==="
 
-    local saved_ip=""
-    [[ -f "$FAILSAFE_IP_FILE" ]] && saved_ip=$(cat "$FAILSAFE_IP_FILE")
+    local saved_ip="" saved_backend=""
+    [[ -f "$FAILSAFE_IP_FILE"       ]] && saved_ip=$(cat "$FAILSAFE_IP_FILE")
+    [[ -f "$FIREWALL_BACKEND_FILE"  ]] && saved_backend=$(cat "$FIREWALL_BACKEND_FILE")
+
+    # Fall back to current detection if backend file is missing
+    if [[ -z "$saved_backend" ]]; then
+        warn "No saved firewall backend — attempting auto-detect for cleanup"
+        saved_backend=$(detect_firewall 2>/dev/null) || saved_backend=""
+    fi
 
     # 1. Remove sshd drop-in and reload
     if remove_sshd_dropin; then
         if reload_sshd; then
             log "sshd reloaded — ListenAddress restored to default (Netbird IP)"
         else
-            err "sshd reload failed after removing drop-in; config is removed but daemon not refreshed"
+            err "sshd reload failed after removing drop-in; config removed but daemon not refreshed"
         fi
     else
         log "No sshd drop-in found — nothing to remove"
     fi
 
-    # 2. Remove UFW rule
-    if [[ -n "$saved_ip" ]]; then
-        delete_ufw_rule "$saved_ip"
-        rm -f "$FAILSAFE_IP_FILE"
+    # 2. Remove firewall rule
+    if [[ -n "$saved_ip" && -n "$saved_backend" ]]; then
+        delete_firewall_rule "$saved_ip" "$saved_backend"
+        rm -f "$FAILSAFE_IP_FILE" "$FIREWALL_BACKEND_FILE"
+    elif [[ -n "$saved_ip" && -z "$saved_backend" ]]; then
+        err "Cannot remove firewall rule for $saved_ip — no backend determined"
+        warn "Remove manually: check 'ufw status numbered' or 'iptables -L INPUT --line-numbers'"
     else
-        warn "No saved failsafe IP found — cannot remove UFW rule automatically"
-        warn "Run: ufw status numbered   and manually delete the netbird-watchdog rule"
+        warn "No saved failsafe IP found — cannot remove firewall rule automatically"
+        warn "Remove manually: check 'ufw status numbered' or 'iptables -L INPUT --line-numbers'"
     fi
 
     set_state "normal"
@@ -272,10 +365,28 @@ preflight() {
 
     [[ $EUID -eq 0 ]] || { err "Must run as root"; ok=0; }
 
-    command -v ufw       &>/dev/null || { err "'ufw' not found in PATH";       ok=0; }
     command -v getent    &>/dev/null || { err "'getent' not found in PATH";    ok=0; }
     command -v systemctl &>/dev/null || { err "'systemctl' not found in PATH"; ok=0; }
     command -v ss        &>/dev/null || { err "'ss' not found in PATH (install iproute2)"; ok=0; }
+
+    case "$FIREWALL" in
+        ufw)
+            command -v ufw &>/dev/null || { err "'ufw' not found in PATH"; ok=0; }
+            ;;
+        iptables)
+            command -v iptables &>/dev/null || { err "'iptables' not found in PATH"; ok=0; }
+            ;;
+        auto)
+            if ! command -v ufw &>/dev/null && ! command -v iptables &>/dev/null; then
+                err "FIREWALL=auto: neither 'ufw' nor 'iptables' found in PATH"
+                ok=0
+            fi
+            ;;
+        *)
+            err "FIREWALL='${FIREWALL}' is invalid — must be: auto, ufw, or iptables"
+            ok=0
+            ;;
+    esac
 
     if [[ "$FAILSAFE_DOMAIN" == "yourdomain.example.com" ]]; then
         err "FAILSAFE_DOMAIN is still the placeholder value — set it in the systemd unit"
@@ -291,7 +402,7 @@ main() {
 
     mkdir -p "$STATE_DIR"
 
-    log "Started | iface=${NETBIRD_IFACE} domain=${FAILSAFE_DOMAIN} port=${SSH_PORT} grace=${GRACE_PERIOD}s interval=${CHECK_INTERVAL}s"
+    log "Started | iface=${NETBIRD_IFACE} domain=${FAILSAFE_DOMAIN} port=${SSH_PORT} firewall=${FIREWALL} grace=${GRACE_PERIOD}s interval=${CHECK_INTERVAL}s"
 
     # If we were in failsafe before a daemon restart, honour that state
     local current_state

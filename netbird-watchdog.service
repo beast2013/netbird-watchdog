@@ -15,6 +15,7 @@ RestartSec=15
 Environment=NETBIRD_IFACE=wt0
 Environment=FAILSAFE_DOMAIN=yourdomain.example.com
 Environment=SSH_PORT=22
+Environment=FIREWALL=auto
 Environment=GRACE_PERIOD=120
 Environment=CHECK_INTERVAL=30
 # ─────────────────────────────────────────────────────────────────────────────

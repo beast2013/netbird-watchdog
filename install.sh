@@ -24,12 +24,14 @@ echo ""
 read -rp "Netbird interface name        [wt0]:           " NB_IFACE
 read -rp "Failsafe domain to resolve    [required]:      " NB_DOMAIN
 read -rp "SSH port                      [22]:            " NB_PORT
+read -rp "Firewall backend (auto/ufw/iptables) [auto]:  " NB_FIREWALL
 read -rp "Grace period in seconds       [120]:           " NB_GRACE
 read -rp "Check interval in seconds     [30]:            " NB_INTERVAL
 
 NB_IFACE="${NB_IFACE:-wt0}"
 NB_DOMAIN="${NB_DOMAIN:-}"
 NB_PORT="${NB_PORT:-22}"
+NB_FIREWALL="${NB_FIREWALL:-auto}"
 NB_GRACE="${NB_GRACE:-120}"
 NB_INTERVAL="${NB_INTERVAL:-30}"
 
@@ -38,11 +40,17 @@ if [[ -z "$NB_DOMAIN" ]]; then
     exit 1
 fi
 
+case "$NB_FIREWALL" in
+    auto|ufw|iptables) ;;
+    *) red "Invalid firewall value '${NB_FIREWALL}' — must be auto, ufw, or iptables"; exit 1 ;;
+esac
+
 echo ""
 green "Configuration:"
 echo "  NETBIRD_IFACE   = $NB_IFACE"
 echo "  FAILSAFE_DOMAIN = $NB_DOMAIN"
 echo "  SSH_PORT        = $NB_PORT"
+echo "  FIREWALL        = $NB_FIREWALL"
 echo "  GRACE_PERIOD    = ${NB_GRACE}s"
 echo "  CHECK_INTERVAL  = ${NB_INTERVAL}s"
 echo ""
@@ -63,6 +71,7 @@ sed -i \
     -e "s|^Environment=NETBIRD_IFACE=.*|Environment=NETBIRD_IFACE=${NB_IFACE}|" \
     -e "s|^Environment=FAILSAFE_DOMAIN=.*|Environment=FAILSAFE_DOMAIN=${NB_DOMAIN}|" \
     -e "s|^Environment=SSH_PORT=.*|Environment=SSH_PORT=${NB_PORT}|" \
+    -e "s|^Environment=FIREWALL=.*|Environment=FIREWALL=${NB_FIREWALL}|" \
     -e "s|^Environment=GRACE_PERIOD=.*|Environment=GRACE_PERIOD=${NB_GRACE}|" \
     -e "s|^Environment=CHECK_INTERVAL=.*|Environment=CHECK_INTERVAL=${NB_INTERVAL}|" \
     "$UNIT_DEST"
