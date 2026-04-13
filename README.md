@@ -42,7 +42,7 @@ All dependencies are present by default on Ubuntu Server 20.04 LTS and later.
 ## Installation
 
 ```bash
-tar -xzf netbird-watchdog.tar.gz
+git clone https://github.com/beast2013/netbird-watchdog.git
 cd netbird-watchdog
 sudo bash install.sh
 ```
