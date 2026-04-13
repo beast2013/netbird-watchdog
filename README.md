@@ -212,26 +212,18 @@ The `/run/netbird-watchdog/` directory is ephemeral — it lives in `tmpfs` and 
 ## Uninstallation
 
 ```bash
-sudo systemctl stop netbird-watchdog
-sudo systemctl disable netbird-watchdog
-sudo rm /etc/systemd/system/netbird-watchdog.service
-sudo rm /usr/local/bin/netbird-watchdog.sh
-sudo rm -f /etc/ssh/sshd_config.d/99-netbird-watchdog.conf
-sudo systemctl daemon-reload
-sudo systemctl reload ssh   # or sshd
+sudo bash uninstall.sh
 ```
 
-If the watchdog was in failsafe state when you uninstalled it, also clean up the firewall rule manually:
+The uninstaller will:
 
-```bash
-# ufw
-sudo ufw status numbered
-sudo ufw delete <rule_number>
+1. Stop and disable the systemd service
+2. Remove the sshd drop-in (if present) and reload sshd
+3. Remove the active firewall rule using the saved backend — so the correct tool is always used regardless of whether `FIREWALL=auto` would resolve differently at uninstall time
+4. Remove the installed script and unit file
+5. Reload the systemd daemon
 
-# iptables
-sudo iptables -L INPUT -n --line-numbers
-sudo iptables -D INPUT <line_number>
-```
+If the watchdog was in failsafe state, a warning is shown before the confirmation prompt. If the firewall rule cannot be removed automatically (e.g. the state directory was lost after a reboot before uninstalling), the script will print the exact manual command needed.
 
 ---
 

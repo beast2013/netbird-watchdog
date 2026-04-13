@@ -43,8 +43,8 @@ set_state() { echo "$1" > "$STATE_FILE"; }
 # Returns 0 if the Netbird interface exists and is operationally up
 iface_up() {
     local state
-    state=$(cat "/sys/class/net/${NETBIRD_IFACE}/operstate" 2>/dev/null) || return 1
-    [[ "$state" == "up" ]]
+    state=$(ip addr show dev ${NETBIRD_IFACE} | awk '/inet/{sub(/\/.*$/,"",$2); print $2}') || return 1
+    [[ "$state" != "" ]]
 }
 
 # Resolves FAILSAFE_DOMAIN to its first IPv4 address; prints it or returns 1
@@ -231,7 +231,8 @@ _ufw_delete() {
 
 _ipt_rule_exists() {
     local ip="$1"
-    iptables -C INPUT -s "$ip" -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null
+    iptables -C INPUT -s "$ip" -p tcp --dport "$SSH_PORT" -j ACCEPT \
+            -m comment --comment "netbird-watchdog" 2>/dev/null
 }
 
 _ipt_add() {
