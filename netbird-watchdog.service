@@ -1,0 +1,37 @@
+[Unit]
+Description=Netbird Watchdog — SSH failsafe on VPN loss
+Documentation=https://github.com/your-org/netbird-watchdog
+# Start after networking and Netbird itself are up (ordering only — not lifecycle bound)
+After=network-online.target netbird.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/netbird-watchdog.sh
+Restart=always
+RestartSec=15
+
+# ── Tune these to your environment ───────────────────────────────────────────
+Environment=NETBIRD_IFACE=wt0
+Environment=FAILSAFE_DOMAIN=yourdomain.example.com
+Environment=SSH_PORT=22
+Environment=GRACE_PERIOD=120
+Environment=CHECK_INTERVAL=30
+# ─────────────────────────────────────────────────────────────────────────────
+
+User=root
+
+# Keep /run/netbird-watchdog state across restarts within the same boot
+RuntimeDirectory=netbird-watchdog
+RuntimeDirectoryPreserve=yes
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=netbird-watchdog
+
+# Prevent runaway restarts
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
