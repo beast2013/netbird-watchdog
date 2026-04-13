@@ -1,4 +1,4 @@
-# netbird-watchdog
+# Netbird Watchdog
 
 A lightweight systemd service that monitors your [Netbird](https://netbird.io) VPN interface and automatically activates an SSH failsafe if the VPN goes down for longer than a configurable grace period.
 
