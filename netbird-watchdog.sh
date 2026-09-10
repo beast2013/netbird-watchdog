@@ -63,9 +63,11 @@ resolve_domain() {
 # Prints the active systemd unit name for sshd (ssh on Debian/Ubuntu, sshd on RHEL)
 sshd_unit() {
     if systemctl list-units --type=service --all --no-legend 2>/dev/null \
+            | sed -E 's/^[[:space:]]*[^[:alnum:][:space:]]+[[:space:]]*//' \
             | awk '{print $1}' | grep -qx 'sshd.service'; then
         echo "sshd"
     elif systemctl list-units --type=service --all --no-legend 2>/dev/null \
+            | sed -E 's/^[[:space:]]*[^[:alnum:][:space:]]+[[:space:]]*//' \
             | awk '{print $1}' | grep -qx 'ssh.service'; then
         echo "ssh"
     else
